@@ -18,6 +18,7 @@ type CombinedResponse struct {
 }
 
 type BrasilApiResponse struct {
+	Api          string `json:"api"`
 	Cep          string `json:"cep"`
 	State        string `json:"state"`
 	City         string `json:"city"`
@@ -34,6 +35,7 @@ type BrasilApiResponse struct {
 }
 
 type ViaCepResponse struct {
+	Api         string `json:"api"`
 	Cep         string `json:"cep"`
 	Logradouro  string `json:"logradouro"`
 	Complemento string `json:"complemento"`
@@ -50,78 +52,79 @@ type ViaCepResponse struct {
 }
 
 func main() {
-    r := chi.NewRouter()
-    r.Use(middleware.Logger)
-    r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-        w.Write([]byte("Hello World using chi!"))
-    })
+	r := chi.NewRouter()
+	r.Use(middleware.Logger)
+	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("Hello World using chi!"))
+	})
 	r.Get("/cep/{cep}", handleCepSearch)
 
-    log.Fatal(http.ListenAndServe(":8080", r))
+	log.Fatal(http.ListenAndServe(":8080", r))
 
 }
 
-func handleCepSearch (w http.ResponseWriter, r *http.Request) {
+func handleCepSearch(w http.ResponseWriter, r *http.Request) {
 	cep := chi.URLParam(r, "cep")
 	ctx, cancel := context.WithTimeout(r.Context(), 1*time.Second)
 	defer cancel()
 	fmt.Printf("Received CEP: %s\n", cep)
+	ch := make(chan any, 2)
 
+	go searchCepInBrasilApi(cep, ctx, ch)
+	go searchCepInViaCepApi(cep, ctx, ch)
+
+	select {
+	case result := <-ch:
+		prettyJSON, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			fmt.Println("Erro ao formatar JSON:", err)
+		} else {
+			fmt.Println("Resposta recebida:")
+			fmt.Println(string(prettyJSON))
+		}
+		w.Header().Set("Content-Type", "application/json")
+
+		json.NewEncoder(w).Encode(result)
+	case <-ctx.Done():
+		fmt.Println("Timeout: nenhuma API respondeu em 1 segundo")
+		http.Error(w, "Timeout: nenhuma API respondeu em 1 segundo", http.StatusGatewayTimeout)
+	}
+}
+
+func searchCepInBrasilApi(cep string, ctx context.Context, ch chan<- any) {
 	urlBrasilApi := "https://brasilapi.com.br/api/cep/v1/" + cep
 
-	reqBrasilApi, err := http.NewRequest("GET", urlBrasilApi, nil)
-	if err != nil {
-		http.Error(w, "Error creating request to Brasil API", http.StatusInternalServerError)
-		return
-	}
-	client := &http.Client{}
-	respBrasilApi, err := client.Do(reqBrasilApi)
-	if err != nil {
-		http.Error(w, "Error making request to Brasil API", http.StatusInternalServerError)
+	reqBrasilApi, _ := http.NewRequestWithContext(ctx, "GET", urlBrasilApi, nil)
+	respBrasilApi, err := http.DefaultClient.Do(reqBrasilApi)
+	if err != nil || respBrasilApi.StatusCode != http.StatusOK {
 		return
 	}
 	defer respBrasilApi.Body.Close()
 
-	jsonDataBrasilApi := &BrasilApiResponse{}
-	if err := json.NewDecoder(respBrasilApi.Body).Decode(jsonDataBrasilApi); err != nil {
-		http.Error(w, "Error decoding response from Brasil API", http.StatusInternalServerError)
+	var data BrasilApiResponse
+	if err := json.NewDecoder(respBrasilApi.Body).Decode(&data); err != nil {
 		return
 	}
-	fmt.Printf("Decoded JSON data: %+v\n", jsonDataBrasilApi)
-	if respBrasilApi.StatusCode != http.StatusOK {
-		http.Error(w, "Error fetching data from Brasil API", respBrasilApi.StatusCode)
-		return
-	}
+	data.Api = "BrasilAPI"
+	ch <- data
+}
 
+func searchCepInViaCepApi(cep string, ctx context.Context, ch chan<- any) {
 	urlViaCep := "https://viacep.com.br/ws/" + cep + "/json/"
-	reqViaCep, err := http.NewRequest("GET", urlViaCep, nil)
-	if err != nil {
-		http.Error(w, "Error creating request to ViaCep API", http.StatusInternalServerError)
-		return
-	}
-	respViaCep, err := client.Do(reqViaCep)
-	if err != nil {
-		http.Error(w, "Error making request to ViaCep API", http.StatusInternalServerError)
-		return
-	}
-	defer respViaCep.Body.Close()
-	if respViaCep.StatusCode != http.StatusOK {
-		http.Error(w, "Error fetching data from ViaCep API", respViaCep.StatusCode)
-		return
-	}
-	jsonDataViaCep := &ViaCepResponse{}
-	if err := json.NewDecoder(respViaCep.Body).Decode(jsonDataViaCep); err != nil {
-		http.Error(w, "Error decoding response from ViaCep API", http.StatusInternalServerError)
-		return
-	}
-	fmt.Printf("Decoded ViaCep JSON data: %+v\n", jsonDataViaCep)
 
-	response := map[string]interface{}{
-		"brasil_api": jsonDataBrasilApi,
-		"via_cep":    jsonDataViaCep,
+	reqViaCepApi, _ := http.NewRequestWithContext(ctx, "GET", urlViaCep, nil)
+	respViaCepApi, err := http.DefaultClient.Do(reqViaCepApi)
+	if err != nil || respViaCepApi.StatusCode != http.StatusOK {
+		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	defer respViaCepApi.Body.Close()
 
+	var data ViaCepResponse
+	if err := json.NewDecoder(respViaCepApi.Body).Decode(&data); err != nil {
+		return
+	}
+
+	data.Api = "ViaCep"
+	ch <- data
 
 }
