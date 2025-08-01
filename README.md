@@ -8,4 +8,4 @@ go run main.go
 
 ### curl para requisicao 
 
-curl -X GET http://localhost:8080/cep/07082050
+curl -X GET http://localhost:8080/cep/{cep}
